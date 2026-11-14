@@ -830,9 +830,9 @@
         <div class="announce" id="home-announce" hidden></div>
         <h2 class="sec-title">কুইক প্লে</h2>
         <div class="qp-grid">
-          <button class="qp-card" id="btn-play" type="button">🎮<b>লাইভ কুইজ</b><span>১০০ প্রশ্ন</span></button>
-          <button class="qp-card pink" id="btn-emoji" type="button">😀<b>ইমোজি কুইজ</b><span>২০ প্রশ্ন</span></button>
-          <button class="qp-card orange" id="btn-battle" type="button">⚔️<b>ব্যাটল মোড</b><span>২০ প্রশ্ন • ১০ সে.</span></button>
+          <button class="qp-card" id="btn-play" type="button">🎮<b>লাইভ কুইজ</b><span>অন্তহীন</span></button>
+          <button class="qp-card pink" id="btn-emoji" type="button">😀<b>ইমোজি কুইজ</b><span>অন্তহীন</span></button>
+          <button class="qp-card orange" id="btn-battle" type="button">⚔️<b>ব্যাটল মোড</b><span>অন্তহীন • ১০ সে.</span></button>
           <button class="qp-card blue" id="btn-persona" type="button">🎭<b>তুমি কোন ক্যারেক্টার?</b><span>৫ প্রশ্ন</span></button>
         </div>
         <div class="daily-card" id="daily-card">
@@ -1876,6 +1876,44 @@
       if (GEN_MODE.prev && PREV_CHARS[name]) return true;
       return false;
     }
+    /* ================= খেলার-স্তরের লক (অন্তহীন খেলা) =================
+       এক খেলায় (লাইভ/ব্যাটল/ইমোজি/৪ ছবি/চোখ/চুল) কোনো সিরিজের নাম বা
+       ক্যারেক্টারের নাম একবারের বেশি আসবে না — বিষয়, সঠিক উত্তর বা যেকোনো
+       ভুল অপশন, যেখানেই আসুক। পুল ফুরিয়ে গেলে খেলা শেষ হয় (ফলাফল দেখায়),
+       রিপিট করে আর প্রশ্ন বানানো হয় না। ডেইলি এই নিয়মের বাইরে নয়, তবে
+       ডেইলি সবসময় নির্দিষ্ট ১০টি প্রশ্নই থাকে। */
+    var GAME_SERIES = {}; /* seriesKey → ১: এই খেলায় ব্যবহৃত সিরিজ */
+    var GAME_CHARS = {};  /* ক্যারেক্টারের নাম → ১: এই খেলায় ব্যবহৃত চরিত্র */
+    var CUR_USED_CHAR = null; /* assembleRound চলাকালে বর্তমান usedChar ম্যাপ */
+    function resetGameLocks(){ GAME_SERIES = {}; GAME_CHARS = {}; CUR_USED_CHAR = null; }
+    /* প্রশ্নটিতে আসা সব সিরিজ ও চরিত্র (বিষয় + সঠিক উত্তর + সব অপশন) */
+    function questionSets(g){
+      var series = {}, chars = {};
+      function addS(t){ var k = seriesKey(t); if (k) series[k] = 1; }
+      function addC(n){ if (n) chars[n] = 1; }
+      function addCharSeries(n){
+        var c = null;
+        try{ c = charByName(n); }catch(e){}
+        if (c && c.anime) addS(c.anime);
+      }
+      if (!g) return { series: series, chars: chars };
+      (seriesMentionKeys(g) || []).forEach(function(k){ series[k] = 1; });
+      if (g.series) addS(g.series);
+      if (g.emoji){ (g.options || []).forEach(addS); if (g.answer) addS(g.answer); }
+      if (g.kind === "photo" || g.kind === "nameseries"){ (g.options || []).forEach(addS); }
+      if (g.fourChars){ g.fourChars.forEach(function(n){ addC(n); addCharSeries(n); }); }
+      (g.allChars || []).forEach(function(n){ addC(n); addCharSeries(n); });
+      if (g.char) addC(g.char);
+      if (g.kind === "who" || g.kind === "crop"){ (g.options || []).forEach(function(n){ addC(n); addCharSeries(n); }); }
+      return { series: series, chars: chars };
+    }
+    function mergeGameSets(qs){
+      (qs || []).forEach(function(g){
+        var s = questionSets(g);
+        Object.keys(s.series).forEach(function(k){ GAME_SERIES[k] = 1; });
+        Object.keys(s.chars).forEach(function(n){ GAME_CHARS[n] = 1; });
+      });
+    }
     function animesPool(){
       var out = [];
       POOL.forEach(function(x){ if (x.anime && out.indexOf(x.anime) === -1) out.push(x.anime); });
@@ -1957,6 +1995,8 @@
       var cl = clusterOf(c.anime);
       POOL.forEach(function(x){
         if (x.name === c.name) return;
+        if (CUR_USED_CHAR && CUR_USED_CHAR[x.name]) return; /* এই খেলায় ব্যবহৃত চরিত্র আর অপশনেও নয় */
+        if (ROUND_LOCK && ROUND_LOCK[seriesKey(x.anime)] && !sameSeries(x.anime, c.anime)) return; /* লক করা সিরিজের চরিত্র নয় */
         if (c.anime && sameSeries(x.anime, c.anime)) same.push(x.name);
         else if (cl && clusterOf(x.anime) === cl) sameCl.push(x.name);
         else rest.push(x.name);
@@ -1989,7 +2029,12 @@
       return out;
     }
     function otherSeriesChars(anime, n){
-      var pool = POOL.filter(function(x){ return x.anime && !sameSeries(x.anime, anime); });
+      var pool = POOL.filter(function(x){
+        if (!x.anime || sameSeries(x.anime, anime)) return false;
+        if (CUR_USED_CHAR && CUR_USED_CHAR[x.name]) return false;
+        if (ROUND_LOCK && ROUND_LOCK[seriesKey(x.anime)]) return false;
+        return true;
+      });
       var fresh = pool.filter(function(x){ return !blockedChar(x.name) && !(GEN_MODE.seen && SEEN_CHARS[x.name]); });
       var src = fresh.length >= n ? fresh : pool;
       var ordered = orderPool(src);
@@ -2098,7 +2143,11 @@
         for (i = 0; i < big.length; i++){
           s = big[i];
           var memAll = members[s].slice();
-          var memFresh = memAll.filter(function(x){ return !blockedChar(x.name); });
+          var memFresh = memAll.filter(function(x){
+            if (blockedChar(x.name)) return false;
+            if (GEN_MODE.charOnce && usedChar[x.name]) return false;
+            return true;
+          });
           var memUse = (GEN_MODE.prev && memFresh.length >= 3) ? memFresh : memAll;
           var memNames = shuffle(memUse.slice()).slice(0, 3).map(function(x){ return x.name; });
           if (memNames.length < 3) continue;
@@ -2199,6 +2248,7 @@
         if (!FRANCHISE_KEYS[seriesKey(e.s)]) continue; /* শুধু সাব্বিরের লিস্টের ফ্র্যাঞ্চাইজি */
         if (usedSuper[key]) continue;
         if (GEN_MODE.charOnce && usedChar[e.a]) continue;
+        if (GEN_MODE.charOnce && e.o.some(function(n){ return usedChar[n]; })) continue; /* অপশনের চরিত্রও এই রাউন্ডে আর আসবে না */
         if (blockedChar(e.a)) continue;
         if (servedBefore(kind, e.a, e.a)) continue;
         if (GEN_MODE.seen && SEEN_CHARS[e.a]) continue;
@@ -2269,6 +2319,11 @@
       GEN_MODE = mode;
       var members = seriesMembers();
       var usedChar = {}, usedSeries = {}, usedSuper = {}, counts = {}, locked = {}, localKeys = {}, qs = [];
+      /* খেলার-স্তরের লক: আগের চাঙ্কে/খেলায় ব্যবহৃত সিরিজ ও চরিত্র এই
+         চাঙ্কেও আসবে না (অন্তহীন খেলায় একই লক পুরো খেলা জুড়ে চলে) */
+      Object.keys(GAME_SERIES).forEach(function(k){ locked[k] = 1; });
+      Object.keys(GAME_CHARS).forEach(function(n){ usedChar[n] = 1; });
+      CUR_USED_CHAR = usedChar;
       ROUND_LOCK = locked; /* জেনারেটরগুলো এই রাউন্ডের লক দেখতে পায় */
       var classicCount = 0; /* রাউন্ডে ক্লাসিক প্রশ্নের হিসাব — লক্ষ্য ~৪০%, গতিতে ছড়িয়ে */
       /* ভারসাম্যপূর্ণ মিশেল: ১০০ প্রশ্নে প্রতি ধরন ১৬টি, এলোমেলো ৪টি ধরন ১৭টি করে */
@@ -2280,21 +2335,37 @@
         /* ক্লাসিক-গতি: রাউন্ডের এই পর্যন্ত ~৪০% ক্লাসিক না হলে ক্লাসিক অগ্রাধিকার */
         PREFER_CLASSIC = classicCount < Math.ceil((qs.length + 1) * 0.4);
         for (var t = 0; t < 3; t++){
+          /* স্ন্যাপশট: জেনারেটর বানাতে গিয়ে বিষয়ের চরিত্র/সিরিজ usedChar/
+             usedSeries/usedSuper-এ দাবি করে নেয়। যাচাই তাই স্ন্যাপশটের
+             (আগের প্রশ্নগুলোর) বিরুদ্ধে হয়, নিজের বিরুদ্ধে নয় — নইলে
+             প্রতিটি প্রশ্ন নিজের সঙ্গেই ধাক্কা খায়। বাতিল হলে দাবিগুলো
+             ফিরিয়ে দেওয়া হয়, যাতে বাতিল প্রশ্ন কিছুই পুড়িয়ে না ফেলে। */
+          var snapChar = {}, snapSeries = {}, snapSuper = {};
+          Object.keys(usedChar).forEach(function(k){ snapChar[k] = 1; });
+          Object.keys(usedSeries).forEach(function(k){ snapSeries[k] = 1; });
+          Object.keys(usedSuper).forEach(function(k){ snapSuper[k] = 1; });
+          function restoreSnap(){
+            Object.keys(usedChar).forEach(function(k){ if (!snapChar[k]) delete usedChar[k]; });
+            Object.keys(usedSeries).forEach(function(k){ if (!snapSeries[k]) delete usedSeries[k]; });
+            Object.keys(usedSuper).forEach(function(k){ if (!snapSuper[k]) delete usedSuper[k]; });
+          }
           var g = (kind === "super")
             ? genSuper(usedChar, usedSuper)
             : genByType(kind, members, usedChar, usedSeries);
-          if (!g) return false;
+          if (!g) { restoreSnap(); return false; }
           var key = qKey(g.kind, g.char, g.answer);
-          if (localKeys[key]) continue;              /* এই রাউন্ডেই একই প্রশ্ন নয় */
-          /* উল্লেখ-লক (কখনো শিথিল হয় না): এই প্রশ্নে নাম আসা কোনো সিরিজই
-             রাউন্ডে আগে উল্লেখিত হলে প্রশ্নটা বাতিল — বিষয়, সঠিক উত্তর আর
-             প্রতিটি ভুল অপশনের সিরিজ — সবই ধরা হয়। */
-          var mk = seriesMentionKeys(g), clash = false;
-          for (var mi2 = 0; mi2 < mk.length; mi2++){ if (locked[mk[mi2]]){ clash = true; break; } }
-          if (clash) continue;
+          if (localKeys[key]) { restoreSnap(); continue; }  /* এই রাউন্ডেই একই প্রশ্ন নয় */
+          /* খেলার-স্তরের লক (কখনো শিথিল হয় না): এই প্রশ্নে নাম আসা কোনো
+             সিরিজ বা চরিত্রই এই খেলায় আগে এলে প্রশ্নটা বাতিল — বিষয়,
+             সঠিক উত্তর আর প্রতিটি ভুল অপশনের সিরিজ ও চরিত্র — সবই ধরা হয়। */
+          var sets = questionSets(g), clash = false;
+          Object.keys(sets.series).forEach(function(k2){ if (locked[k2]) clash = true; });
+          if (!clash) Object.keys(sets.chars).forEach(function(n2){ if (snapChar[n2]) clash = true; });
+          if (clash) { restoreSnap(); continue; }
           localKeys[key] = 1;
-          mk.forEach(function(k2){ locked[k2] = 1; });
-          g.mentions = mk;
+          Object.keys(sets.series).forEach(function(k2){ locked[k2] = 1; });
+          Object.keys(sets.chars).forEach(function(n2){ usedChar[n2] = 1; });
+          g.mentions = Object.keys(sets.series);
           counts[kind] = (counts[kind] || 0) + 1;
           if (isClassic(g.series)) classicCount++;
           qs.push(g);
@@ -2325,24 +2396,40 @@
         }
       }
       ROUND_LOCK = null;
+      CUR_USED_CHAR = null;
+      mergeGameSets(qs); /* এই চাঙ্কের সিরিজ/চরিত্র খেলার লকে তোলা হলো */
       return qs;
     }
+    /* কাঁচা প্রশ্নগুলোকে খেলার প্রশ্নে মোড়ানো ({q, opts}) */
+    function wrapQuestions(picked){
+      return picked.map(function(q){
+        return { q: q, opts: shuffle(q.options.map(function(t){ return { text: t, ok: t === q.answer }; })) };
+      });
+    }
     function buildRound(){
-      /* ধাপে ধাপে শিথিল: রেজিস্ট্রি ও ধারাবাহিকতা আগে, পুল ফুরালে তবেই ছাড় —
-         কিন্তু উল্লেখ-লক কোনো ধাপেই শিথিল হয় না (GEN_MODE-এর বাইরে, আলাদা পাহারা) */
+      /* পুরনো নাম — এখন কঠোর চাঙ্ক বিল্ডারই ডাকা হয় (৫ম শিথিল ধাপটি আর
+         নেই: সিরিজ/চরিত্রের লক কোনো ধাপেই শিথিল হয় না) */
+      return buildChunk(ROUND_SIZE);
+    }
+    /* এক চাঙ্ক প্রশ্ন বানানো: ধাপে ধাপে শিথিল করে ভরাট করা হয়, কিন্তু
+       সিরিজ/চরিত্র একবার ব্যবহৃত হলে আর আসে না — পুল ফুরিয়ে গেলে চাঙ্ক
+       ছোট হয় বা খালি আসে, রিপিট করে ভরাট করা হয় না। */
+    function buildChunk(n){
+      var realRound = ROUND_SIZE, out = [];
       var tiers = [
         { prev:true,  seen:true,  served:true,  charOnce:true,  seriesOnce:true },
         { prev:true,  seen:false, served:true,  charOnce:true,  seriesOnce:true },
         { prev:false, seen:false, served:true,  charOnce:true,  seriesOnce:true },
-        { prev:false, seen:false, served:false, charOnce:true,  seriesOnce:true },
-        { prev:false, seen:false, served:false, charOnce:false, seriesOnce:false }
+        { prev:false, seen:false, served:false, charOnce:true,  seriesOnce:true }
       ];
-      var qs = [];
-      for (var i = 0; i < tiers.length; i++){
-        qs = assembleRound(tiers[i]);
-        if (qs.length >= ROUND_SIZE) break;
-      }
-      return qs.slice(0, ROUND_SIZE);
+      try {
+        for (var i = 0; i < tiers.length && out.length < n; i++){
+          ROUND_SIZE = n - out.length;
+          var part = assembleRound(tiers[i]);
+          out = out.concat(part);
+        }
+      } finally { ROUND_SIZE = realRound; }
+      return out.slice(0, n);
     }
     /* পরিবেশিত রাউন্ড রেজিস্ট্রিতে তোলা: এই প্রশ্নগুলো এই সেশনে আর আসবে না */
     function registerRound(picked){
@@ -2426,6 +2513,7 @@
     /* ডেইলি রাউন্ড বানানো: বীজ-দেওয়া RNG + রিজার্ভ পুল + রেজিস্ট্রি ছাড়া —
        সেশনের ইতিহাস যাই হোক, একই তারিখে সবার একই ১০টি প্রশ্ন ও একই অপশন-ক্রম। */
     function buildDailyRound(ds){
+      resetGameLocks(); /* ডেইলি নিজেই একটা খেলা — আগের খেলার লক এখানে নয় */
       var realRandom = Math.random, realRound = ROUND_SIZE, realPool = POOL, realMode = GEN_MODE;
       var questions = [];
       try{
@@ -2433,15 +2521,30 @@
         ROUND_SIZE = DAILY_SIZE;
         POOL = reservePool();
         poolByNameSize = -1; /* charByName ক্যাশ আবার বানাবে */
+        var _theme0 = getDailyTheme();
+        if (_theme0) GAME_SERIES[seriesKey(_theme0)] = 1; /* থিমের সিরিজ বাকি ৯ প্রশ্নে আসবে না — প্রথম প্রশ্নটাই থিমের হবে */
         var picked = assembleRound({ prev:false, seen:false, served:false, charOnce:true, seriesOnce:true });
-        /* থিম: প্রথম প্রশ্নটি থিমের সিরিজ থেকে (একই তারিখ+থিমে সবার একই) */
+        /* থিম: প্রথম প্রশ্নটি থিমের সিরিজ থেকে (একই তারিখ+থিমে সবার একই) —
+           তবে বদলানো প্রশ্নটিও ডুপ্লিকেট-নিয়ম মানতে হবে: থিমের সিরিজ বা
+           অপশনের কোনো চরিত্র বাকি ৯ প্রশ্নে থাকলে বদলানো হয় না। */
         var _theme = getDailyTheme();
         if (_theme && picked.length) {
+          var _restS = {}, _restC = {};
+          for (var _qi = 1; _qi < picked.length; _qi++){
+            var _ss = questionSets(picked[_qi]);
+            Object.keys(_ss.series).forEach(function(k){ _restS[k] = 1; });
+            Object.keys(_ss.chars).forEach(function(n){ _restC[n] = 1; });
+          }
           var _tc = POOL.filter(function(x){ return x.anime === _theme && x.img; });
           shuffle(_tc);
           for (var _ti = 0; _ti < _tc.length; _ti++) {
-            var _used = picked.some(function(q){ return q.allChars && q.allChars.indexOf(_tc[_ti].name) >= 0; });
-            if (!_used) { try { picked[0] = qWho(_tc[_ti]); } catch(e){} break; }
+            var _cand = null;
+            try { _cand = qWho(_tc[_ti]); } catch(e){ _cand = null; }
+            if (!_cand) continue;
+            var _cs = questionSets(_cand), _clash = false;
+            Object.keys(_cs.series).forEach(function(k){ if (_restS[k]) _clash = true; });
+            Object.keys(_cs.chars).forEach(function(n){ if (_restC[n]) _clash = true; });
+            if (!_clash) { picked[0] = _cand; break; }
           }
         }
         questions = picked.map(function(q){
@@ -2496,7 +2599,7 @@
       }
       resetHat();
       S = {
-        mode: "daily", date: ds, questions: questions,
+        mode: "daily", date: ds, questions: questions, genChunk: null, exhausted: false,
         idx: 0, score: 0, correct: 0, streak: 0, bestStreak: 0,
         totalTime: 0, timer: null, timeLeft: QUESTION_TIME, locked: false, answers: []
       };
@@ -2512,6 +2615,7 @@
     }
 
     function startRound(){
+      resetGameLocks(); /* নতুন খেলা — নতুন লক */
       QUESTION_TIME = 20;
       currentMode = "live";
       roundToken++;
@@ -2520,7 +2624,7 @@
       $("q-card").hidden = true;
       $("state-error").hidden = true;
       $("state-loading").hidden = false;
-      $("ui-progress").textContent = "প্রশ্ন " + bn(1) + " / " + bn(ROUND_SIZE);
+      $("ui-progress").textContent = "প্রশ্ন " + bn(1);
       $("ui-progress-fill").style.width = "0%";
       $("ui-score").textContent = bn(0);
       $("ui-streak").textContent = bn(0);
@@ -2530,20 +2634,20 @@
         if (myToken !== roundToken) return;
         ensureReserve();
         resetHat(); /* নতুন রাউন্ডে ট্রফি টুপি আবার শূন্য থেকে */
-        var picked = buildRound();
+        var picked = buildChunk(LIVE_CHUNK);
         if (picked.length < 10){
           $("state-loading").hidden = true;
           $("state-error").hidden = false;
           return;
         }
-        /* পুলে আলাদা সিরিজ ১০০টির কম থাকলে রাউন্ড ছোট হয় — তবু কোনো সিরিজের
-           নাম রাউন্ডে দুইবার আসে না (উল্লেখ-লক কখনো ভাঙা হয় না) */
+        /* অন্তহীন খেলা: প্রথম চাঙ্ক দিয়ে শুরু, পুল ফুরোলে খেলা শেষ হয় —
+           কোনো সিরিজ/চরিত্র এক খেলায় দুইবার আসে না */
         registerRound(picked); /* রেজিস্ট্রিতে তুলে রাখা হলো — আর কখনো আসবে না */
         S = {
           mode: "live",
-          questions: picked.map(function(q){
-            return { q: q, opts: shuffle(q.options.map(function(t){ return { text: t, ok: t === q.answer }; })) };
-          }),
+          genChunk: function(){ return wrapQuestions(buildChunk(LIVE_CHUNK)); },
+          exhausted: false,
+          questions: wrapQuestions(picked),
           idx: 0, score: 0, correct: 0, streak: 0, bestStreak: 0,
           totalTime: 0, timer: null, timeLeft: QUESTION_TIME, locked: false, answers: []
         };
@@ -2565,7 +2669,9 @@
       card.classList.remove("shake","glow");
       var staleLuffy = $("stage").querySelector(".luffy-layer");
       if (staleLuffy) staleLuffy.remove();
-      $("ui-progress").textContent = "প্রশ্ন " + bn(S.idx + 1) + " / " + bn(S.questions.length);
+      $("ui-progress").textContent = (S.mode === "daily")
+        ? ("প্রশ্ন " + bn(S.idx + 1) + " / " + bn(S.questions.length))
+        : ("প্রশ্ন " + bn(S.idx + 1));
       $("ui-progress-fill").style.width = (S.idx / S.questions.length * 100) + "%";
       $("ui-score").textContent = bn(S.score);
       $("ui-streak").textContent = bn(S.streak);
@@ -2909,7 +3015,10 @@
       fb.hidden = false;
       var nb = $("btn-next");
       nb.hidden = false;
-      nb.innerHTML = (S.idx === S.questions.length - 1 ? "ফলাফল দেখো" : "পরের প্রশ্ন") +
+      var _isLast = (S.idx === S.questions.length - 1);
+      if (_isLast && S.mode !== "daily" && !S.exhausted) ensureMore(); /* অন্তহীন: আরও প্রশ্ন আছে কি না আগেই দেখা */
+      _isLast = (S.idx === S.questions.length - 1);
+      nb.innerHTML = (_isLast ? "ফলাফল দেখো" : "পরের প্রশ্ন") +
         ' <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg>';
       nb.focus();
     }
@@ -2980,7 +3089,7 @@
     }
     function finish(){
       stopTimer();
-      var total = S.questions.length;
+      var total = S.answers.length || S.questions.length;
       var pct = Math.round(S.correct / total * 100);
       var r = rankFor(pct);
       var isBest = S.score > bestScore;
@@ -3175,30 +3284,45 @@
     /* ---------- মোড লেবেল ---------- */
     var MODE_LABELS = { live: "লাইভ কুইজ", daily: "আজকের চ্যালেঞ্জ", emoji: "ইমোজি কুইজ", battle: "ব্যাটল মোড", pics: "৪ ছবির কুইজ", eyes: "চোখের কুইজ", hair: "চুলের কুইজ" };
     var ARCADE_SIZE = 20, BATTLE_TIME = 10;
+    var LIVE_CHUNK = 20, ARCADE_CHUNK = 5; /* অন্তহীন খেলায় একবারে কত প্রশ্ন বানানো হয় */
 
     /* ---------- সাধারণ আর্কেড শুরু (emoji/battle/pics/eyes/hair) ---------- */
-    function startArcade(mode, questions, timeSec){
+    /* অন্তহীন খেলা: পরের চাঙ্ক আনা (পুল ফুরিয়ে গেলে false) */
+    function ensureMore(){
+      if (!S || S.exhausted || typeof S.genChunk !== "function") return false;
+      var more = S.genChunk();
+      if (!more || !more.length){ S.exhausted = true; return false; }
+      if (S.mode === "live" || S.mode === "battle") registerRound(more.map(function(it){ return it.q; }));
+      more.forEach(function(it){ S.questions.push(it); });
+      return true;
+    }
+    function startArcade(mode, questions, timeSec, genChunk){
       currentMode = mode; roundToken++; QUESTION_TIME = timeSec;
-      if (!questions || questions.length < 5) {
+      if (!questions || questions.length < 1) {
         showScreen("quiz"); $("q-card").hidden = true; $("state-loading").hidden = true; $("state-error").hidden = false; return;
       }
       resetHat();
-      S = { mode: mode, questions: questions, idx: 0, score: 0, correct: 0, streak: 0, bestStreak: 0, totalTime: 0, timer: null, timeLeft: QUESTION_TIME, locked: false, answers: [] };
+      S = { mode: mode, questions: questions, genChunk: (typeof genChunk === "function" ? genChunk : null), exhausted: false, idx: 0, score: 0, correct: 0, streak: 0, bestStreak: 0, totalTime: 0, timer: null, timeLeft: QUESTION_TIME, locked: false, answers: [] };
       showScreen("quiz"); $("state-error").hidden = true; $("state-loading").hidden = true; $("q-card").hidden = false;
       $("ui-score").textContent = bn(0); $("ui-streak").textContent = bn(0); $("ui-time").textContent = bn(QUESTION_TIME); $("ui-ring").style.strokeDashoffset = "0";
       renderQuestion();
     }
     function buildArcadeRound(n){
-      var realRandom = Math.random, realRound = ROUND_SIZE, realPool = POOL, realMode = GEN_MODE;
+      /* ব্যাটল: রিজার্ভ পুল থেকে চাঙ্ক বানানো (অন্তহীন — পুল ফুরোলে শেষ) */
+      var realPool = POOL, realMode = GEN_MODE;
       var questions = [];
       try {
-        ROUND_SIZE = n; POOL = reservePool(); poolByNameSize = -1;
-        var picked = assembleRound({ prev:false, seen:false, served:false, charOnce:true, seriesOnce:true });
-        questions = picked.map(function(q){ return { q: q, opts: shuffle(q.options.map(function(t){ return { text: t, ok: t === q.answer }; })) }; });
-      } finally { Math.random = realRandom; ROUND_SIZE = realRound; POOL = realPool; poolByNameSize = -1; GEN_MODE = realMode; }
+        POOL = reservePool(); poolByNameSize = -1;
+        var picked = buildChunk(n);
+        questions = wrapQuestions(picked);
+      } finally { POOL = realPool; poolByNameSize = -1; GEN_MODE = realMode; }
       return questions;
     }
-    function startBattle(){ startArcade("battle", buildArcadeRound(ARCADE_SIZE), BATTLE_TIME); }
+    function startBattle(){
+      resetGameLocks();
+      var first = buildArcadeRound(LIVE_CHUNK);
+      startArcade("battle", first, BATTLE_TIME, function(){ return buildArcadeRound(ARCADE_CHUNK); });
+    }
 
     /* ---------- ইমোজি কুইজ ---------- */
     var EMOJI_MAP = [
@@ -3221,63 +3345,121 @@
       {e:"👼🍳🏠", a:"The Angel Next Door Spoils Me Rotten"}, {e:"💋📚😅", a:"Itazura na Kiss"}, {e:"🎸🎤🖤", a:"Nana"},
       {e:"🐱🐭🌸", a:"Fruits Basket"}, {e:"🌹☕🎩", a:"Ouran High School Host Club"}
     ];
-    function buildEmojiRound(){
+    var EMOJI_LEFT = null;
+    function emojiGenReset(){ EMOJI_LEFT = shuffle(EMOJI_MAP.slice()); }
+    function nextEmojiQuestion(){
+      if (!EMOJI_LEFT) emojiGenReset();
       var allSeries = EMOJI_MAP.map(function(m){ return m.a; });
-      return shuffle(EMOJI_MAP.slice()).slice(0, ARCADE_SIZE).map(function(m){
-        var opts = [m.a];
-        while (opts.length < 4) { var c = pick(allSeries); if (opts.indexOf(c) < 0) opts.push(c); }
-        opts = shuffle(opts);
+      while (EMOJI_LEFT.length){
+        var m = EMOJI_LEFT.shift();
+        if (GAME_SERIES[seriesKey(m.a)]) continue; /* এই সিরিজের নাম খেলায় এসে গেছে */
+        var cands = shuffle(allSeries.filter(function(a){ return a !== m.a && !GAME_SERIES[seriesKey(a)]; }));
+        if (cands.length < 3) continue; /* বিভ্রান্তিকর অপশনের জন্য নতুন সিরিজ নেই */
+        var opts = shuffle([m.a].concat(cands.slice(0, 3)));
+        GAME_SERIES[seriesKey(m.a)] = 1;
+        opts.forEach(function(o){ GAME_SERIES[seriesKey(o)] = 1; });
         return { q: { q: "ইমোজি দেখে সিরিজটা চেনো", cat: "ইমোজি", diff: "মজা", emoji: true, subjectLabel: "ইমোজি", subjectName: m.e, options: opts, answer: m.a }, opts: opts.map(function(t){ return { text: t, ok: t === m.a }; }) };
-      });
+      }
+      return null;
     }
-    function startEmoji(){ startArcade("emoji", buildEmojiRound(), 20); }
+    /* এক ব্যাচ ইমোজি প্রশ্ন — পুল ফুরোলে ছোট/খালি আসে, রিপিট হয় না */
+    function buildEmojiRound(n){
+      var out = [], q;
+      n = n || ARCADE_SIZE;
+      while (out.length < n && (q = nextEmojiQuestion())) out.push(q);
+      return out;
+    }
+    function startEmoji(){
+      resetGameLocks(); emojiGenReset();
+      startArcade("emoji", buildEmojiRound(ARCADE_CHUNK), 20, function(){ return buildEmojiRound(ARCADE_CHUNK); });
+    }
 
     /* ---------- ৪ ছবির কুইজ (কঠিন→সহজ: কম-পরিচিত আগে) ---------- */
-    function buildPicsRound(){
+    var PICS_STATE = null;
+    function picsGenReset(){
       var pool = reservePool();
       var bySeries = {};
       pool.forEach(function(c){ (bySeries[c.anime] = bySeries[c.anime] || []).push(c); });
-      var allSeries = Object.keys(bySeries);
-      var usedSets = {}, qs = [], tries = 0;
-      while (qs.length < ARCADE_SIZE && tries < 400) {
-        tries++;
-        var a = pick(allSeries);
+      PICS_STATE = { bySeries: bySeries, series: shuffle(Object.keys(bySeries)) };
+    }
+    function nextPicsQuestion(){
+      if (!PICS_STATE) picsGenReset();
+      var bySeries = PICS_STATE.bySeries;
+      while (PICS_STATE.series.length){
+        var a = PICS_STATE.series.shift();
+        if (GAME_SERIES[seriesKey(a)]) continue; /* এই সিরিজ খেলায় এসে গেছে */
         var chars = bySeries[a].slice().sort(function(x, y){ return x.favs - y.favs; });
         if (chars.length < 4) continue;
         var four = shuffle(chars).slice(0, 4).sort(function(x, y){ return x.favs - y.favs; });
-        var key = a + "|" + four.map(function(c){ return c.name; }).sort().join(",");
-        if (usedSets[key]) continue; usedSets[key] = 1;
-        var opts = [a];
-        while (opts.length < 4) { var c = pick(allSeries); if (opts.indexOf(c) < 0) opts.push(c); }
-        opts = shuffle(opts);
-        qs.push({ q: { q: "এই ৪ জন কোন সিরিজের?", cat: "৪ ছবি", diff: "মাঝারি", fourPics: four.map(function(c){ return imgFor(c.name); }), options: opts, answer: a, subjectName: a }, opts: opts.map(function(t){ return { text: t, ok: t === a }; }) });
+        if (four.some(function(c){ return GAME_CHARS[c.name]; })) continue;
+        var freshS = Object.keys(bySeries).filter(function(s){ return !GAME_SERIES[seriesKey(s)]; });
+        /* ভুল অপশনের সিরিজ হিসেবে ছোট (৪ জনের কম) সিরিজ আগে নেওয়া হয় —
+           ৪+ সিরিজ উত্তর হিসেবে বাঁচিয়ে রাখা হয়, নইলে খেলা তাড়াতাড়ি শেষ হয় */
+        var smallS = freshS.filter(function(s){ return bySeries[s].length < 4; });
+        var bigS = freshS.filter(function(s){ return bySeries[s].length >= 4; });
+        var distract = shuffle(smallS).concat(shuffle(bigS));
+        if (distract.length < 3) continue;
+        var opts = shuffle([a].concat(distract.slice(0, 3)));
+        GAME_SERIES[seriesKey(a)] = 1;
+        four.forEach(function(c){ GAME_CHARS[c.name] = 1; });
+        opts.forEach(function(o){ GAME_SERIES[seriesKey(o)] = 1; });
+        return { q: { q: "এই ৪ জন কোন সিরিজের?", cat: "৪ ছবি", diff: "মাঝারি", fourPics: four.map(function(c){ return imgFor(c.name); }), fourChars: four.map(function(c){ return c.name; }), options: opts, answer: a, subjectName: a }, opts: opts.map(function(t){ return { text: t, ok: t === a }; }) };
       }
-      return shuffle(qs);
+      return null;
     }
-    function startPics(){ startArcade("pics", buildPicsRound(), 20); }
+    function buildPicsRound(n){
+      var out = [], q;
+      n = n || ARCADE_SIZE;
+      while (out.length < n && (q = nextPicsQuestion())) out.push(q);
+      return out;
+    }
+    function startPics(){
+      resetGameLocks(); picsGenReset();
+      startArcade("pics", buildPicsRound(ARCADE_CHUNK), 20, function(){ return buildPicsRound(ARCADE_CHUNK); });
+    }
 
     /* ---------- চোখ / চুলের কুইজ (CSS ক্রপ; ছোট ছবিতে blur ফলব্যাক) ---------- */
     var IMG_SMALL = ["Vash the Stampede", "Eikichi Onizuka"];
     function optImgMap(names){ var m = {}; names.forEach(function(n){ m[n] = imgFor(n); }); return m; }
-    function buildCropRound(kind){
-      var pool = reservePool();
-      var qs = [], usedChars = {}, tries = 0;
-      while (qs.length < ARCADE_SIZE && tries < 400) {
-        tries++;
-        var c = pick(pool);
-        if (usedChars[c.name]) continue; usedChars[c.name] = 1;
-        var same = pool.filter(function(x){ return x.anime === c.anime && x.name !== c.name; });
-        var dpool = same.length >= 3 ? same : pool;
+    var CROP_POOL = null;
+    function cropGenReset(){ CROP_POOL = shuffle(reservePool()); }
+    function nextCropQuestion(kind){
+      if (!CROP_POOL) cropGenReset();
+      var pool = CROP_POOL, i, j, k;
+      for (i = 0; i < pool.length; i++){
+        var c = pool[i];
+        if (GAME_CHARS[c.name] || GAME_SERIES[seriesKey(c.anime)]) continue;
+        var same = shuffle(pool.filter(function(x){ return x.anime === c.anime && x.name !== c.name && !GAME_CHARS[x.name]; }));
+        var others = shuffle(pool.filter(function(x){ return x.anime !== c.anime && !GAME_CHARS[x.name] && !GAME_SERIES[seriesKey(x.anime)]; }));
         var opts = [c.name];
-        while (opts.length < 4) { var d = pick(dpool); if (opts.indexOf(d.name) < 0) opts.push(d.name); }
+        for (j = 0; j < same.length && opts.length < 4; j++) opts.push(same[j].name);
+        for (j = 0; j < others.length && opts.length < 4; j++) opts.push(others[j].name);
+        if (opts.length < 4) continue;
         opts = shuffle(opts);
         var crop = (IMG_SMALL.indexOf(c.name) >= 0) ? "blur" : kind;
-        qs.push({ q: { q: kind === "eyes" ? "এই চোখ কার?" : "এই চুল কার?", cat: kind === "eyes" ? "চোখ" : "চুল", diff: "কঠিন", img: imgFor(c.name), crop: crop, char: c.name, hideName: true, subjectName: c.name, options: opts, answer: c.name, optImgs: optImgMap(opts) }, opts: opts.map(function(t){ return { text: t, ok: t === c.name }; }) });
+        GAME_CHARS[c.name] = 1;
+        opts.forEach(function(n){
+          GAME_CHARS[n] = 1;
+          for (k = 0; k < pool.length; k++){ if (pool[k].name === n){ GAME_SERIES[seriesKey(pool[k].anime)] = 1; break; } }
+        });
+        return { q: { q: kind === "eyes" ? "এই চোখ কার?" : "এই চুল কার?", cat: kind === "eyes" ? "চোখ" : "চুল", diff: "কঠিন", img: imgFor(c.name), crop: crop, char: c.name, hideName: true, subjectName: c.name, options: opts, answer: c.name, optImgs: optImgMap(opts), allChars: opts.slice() }, opts: opts.map(function(t){ return { text: t, ok: t === c.name }; }) };
       }
-      return qs;
+      return null;
     }
-    function startEyes(){ startArcade("eyes", buildCropRound("eyes"), 20); }
-    function startHair(){ startArcade("hair", buildCropRound("hair"), 20); }
+    function buildCropRound(kind, n){
+      var out = [], q;
+      n = n || ARCADE_SIZE;
+      while (out.length < n && (q = nextCropQuestion(kind))) out.push(q);
+      return out;
+    }
+    function startEyes(){
+      resetGameLocks(); cropGenReset();
+      startArcade("eyes", buildCropRound("eyes", ARCADE_CHUNK), 20, function(){ return buildCropRound("eyes", ARCADE_CHUNK); });
+    }
+    function startHair(){
+      resetGameLocks(); cropGenReset();
+      startArcade("hair", buildCropRound("hair", ARCADE_CHUNK), 20, function(){ return buildCropRound("hair", ARCADE_CHUNK); });
+    }
 
 
     /* ---------- পার্সোনালিটি কুইজ: তুমি কোন ক্যারেক্টার? ---------- */
@@ -3582,8 +3764,9 @@
     $("btn-retry2").addEventListener("click", function(){ sndClick(); retryMode(); });
     $("btn-next").addEventListener("click", function(){
       sndClick();
-      if (S.idx === S.questions.length - 1) finish();
-      else { S.idx++; renderQuestion(); }
+      if (S.idx + 1 < S.questions.length){ S.idx++; renderQuestion(); return; }
+      if (ensureMore()){ S.idx++; renderQuestion(); return; }
+      finish(); /* পুল ফুরিয়ে গেছে — ফলাফল দেখাও, রিপিট নয় */
     });
     $("btn-quit").addEventListener("click", function(){ roundToken++; stopTimer(); sndClick(); showScreen("home"); });
     $("btn-again").addEventListener("click", function(){ sndClick(); if (S && S.mode === "daily") showScreen("home"); else if (S && S.mode === "emoji") startEmoji(); else if (S && S.mode === "battle") startBattle(); else if (S && S.mode === "pics") startPics(); else if (S && S.mode === "eyes") startEyes(); else if (S && S.mode === "hair") startHair(); else startRound(); });
